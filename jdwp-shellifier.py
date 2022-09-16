@@ -148,10 +148,7 @@ class JDWPClient:
                     data[name] = buf[index+4:index+4+l]
                     index += 4+l
                 elif fmt == 'C':
-                    data[name] = ord(
-                        struct.unpack(">c",
-                                                   bytes(str(buf[index]), encoding="utf-8")
-                                      )[0])
+                    data[name] = ord(struct.unpack(">c", buf[index:index+1])[0])
                     index += 1
                 elif fmt == 'Z':
                     t = ord(struct.unpack(">c", buf[index])[0])
@@ -167,7 +164,7 @@ class JDWPClient:
                 else:
                     print("Error")
                     sys.exit(1)
-
+            print(data)
             entries.append( data )
 
         return entries
